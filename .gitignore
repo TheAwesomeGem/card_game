@@ -1,0 +1,5 @@
+# Project exclude paths
+/build/
+/build/debug/
+/build/release/
+/.idea/
