@@ -38,17 +38,8 @@ struct RenderComponent {
     Texture2D texture;
 };
 
-struct StackData {
-    explicit StackData(int max_stack_count_) : max_stack_count{max_stack_count_}, stacked_entities{} {
-
-    }
-
-    int max_stack_count;
-    std::deque<EntityId> stacked_entities;
-};
-
 struct StackableComponent {
-    StackData* stack = nullptr;
+    int stack_index = 0;
     // TODO: Perhaps add stack offset either here or the Render Component?
 };
 
@@ -71,16 +62,39 @@ static auto uuid_rng = uuids::uuid_random_generator(rng);
 static std::unordered_map<EntityId, Entity> entities; // TODO: This might not be good for performance especially since we loop this quite frequently
 
 Vector2 RecToVec(Rectangle rec) {
-    return Vector2{rec.x, rec.y};
+    return Vector2{rec.x - rec.width * 0.5F, rec.y - rec.height * 0.5F};
 }
 
 float RecDistSqr(Rectangle rec1, Rectangle rec2) {
     return Vector2DistanceSqr(RecToVec(rec1), RecToVec(rec2));
 }
 
+bool close_to(float a, float b, float epsilon) {
+    return fabs(a - b) <= ((fabs(a) < fabs(b) ? fabs(b) : fabs(a)) * epsilon);
+}
+
+Entity* top_entity(Rectangle rec, const std::function<bool(Entity&)>& predicate) {
+    int stack_index = 0;
+    Entity* result = nullptr;
+
+    for (auto& [_, other_entity]: entities) {
+        if (!predicate(other_entity)) {
+            continue;
+        }
+
+        if (other_entity.stackable->stack_index >= stack_index) {
+            result = &other_entity;
+            stack_index = other_entity.stackable->stack_index;
+        }
+    }
+
+    return result;
+}
+
+// TODO: Is there a way to combine these two loops?
 Entity* closest_entity(Rectangle rec, const std::function<bool(Entity&)>& predicate) {
     float closest_dist = std::numeric_limits<float>::max();
-    Entity* result = nullptr;
+    Vector2 close_vec;
 
     for (auto& [_, other_entity]: entities) {
         if (!predicate(other_entity)) {
@@ -90,8 +104,28 @@ Entity* closest_entity(Rectangle rec, const std::function<bool(Entity&)>& predic
         float dist_to_drop = RecDistSqr(rec, other_entity.transform->rec);
 
         if (dist_to_drop < closest_dist) {
-            result = &other_entity;
+            close_vec = RecToVec(other_entity.transform->rec);
             closest_dist = dist_to_drop;
+        }
+    }
+
+    Entity* result = nullptr;
+    int stack_index = 0;
+    for (auto& [_, other_entity]: entities) {
+        if (!predicate(other_entity)) {
+            continue;
+        }
+
+        Vector2 other_vec = RecToVec(other_entity.transform->rec);
+
+        // TODO: Create a function that checks if two vecs are close to each other.
+        if (!(close_to(close_vec.x, other_vec.x, 0.1F) && close_to(close_vec.y, other_vec.y, 0.1F))) {
+            continue;
+        }
+
+        if (other_entity.stackable->stack_index >= stack_index) {
+            result = &other_entity;
+            stack_index = other_entity.stackable->stack_index;
         }
     }
 
@@ -104,48 +138,8 @@ static void move_to_entity(Entity& entity, const Entity& other_entity) {
 }
 
 static void stack_to_entity(Entity& entity_to_stack, Entity& other_entity) {
-    if (entity_to_stack.stackable->stack != nullptr && other_entity.stackable->stack != nullptr && entity_to_stack.stackable->stack == other_entity.stackable->stack) {
-        printf("Stacked to the same entity. No change required.\n");
-
-        return;
-    }
-
-    if (entity_to_stack.stackable->stack) {
-        StackData* stack = entity_to_stack.stackable->stack;
-        entity_to_stack.stackable->stack = nullptr;
-        stack->stacked_entities.pop_front(); // Assume that the last selected entity is always at the front of the stack.
-
-        if (stack->stacked_entities.size() < 2) {
-            entities.at(stack->stacked_entities.front()).stackable->stack = nullptr;
-            stack->stacked_entities.clear();
-            printf("Destructing the stack.\n");
-            delete stack; // Could use shared pointer here.
-        }
-
-        printf("Removing entity from old stack.\n");
-    }
-
-    if (other_entity.stackable->stack) {
-        StackData* stack = other_entity.stackable->stack;
-        stack->stacked_entities.push_front(entity_to_stack.id);
-        entity_to_stack.stackable->stack = stack;
-
-        printf("The new stack exists so adding this entity to the new stack.\n");
-    } else {
-        StackData* stack = new StackData{40}; // TODO: Change the max stack amount based on the context.
-        stack->stacked_entities.push_front(other_entity.id);
-        stack->stacked_entities.push_front(entity_to_stack.id);
-        entity_to_stack.stackable->stack = stack;
-        other_entity.stackable->stack = stack;
-
-        printf("Stack does not exist. Creating a new one.\n");
-    }
-
+    entity_to_stack.stackable->stack_index = other_entity.stackable->stack_index + 1;
     move_to_entity(entity_to_stack, other_entity);
-}
-
-static Entity* get_top_entity_from_stack(StackData* stack) {
-    return &entities.at(stack->stacked_entities.front());
 }
 
 int main() {
@@ -214,29 +208,24 @@ int main() {
             left_clicked = true;
             // User just pressed left click
 
-            for (auto& [_, entity]: entities) {
-                if (entity.draggable && entity.transform && entity.stackable) {
-                    // Drag System
-                    if (CheckCollisionPointRec(Vector2{(float) GetMouseX(), (float) GetMouseY()}, entity.transform->rec)) {
-                        if (entity.stackable.has_value() && entity.stackable->stack) {
-                            Entity* entity_to_select = get_top_entity_from_stack(entity.stackable->stack);
-
-                            if (entity_to_select) {
-                                entity_to_select->transform->last_rec = entity_to_select->transform->rec;
-                                entity_to_select->draggable->is_selected = true;
-                            } else {
-                                printf("Something terrible happened.\n");
-                            }
-                        } else {
-                            entity.transform->last_rec = entity.transform->rec;
-                            entity.draggable->is_selected = true;
-                        }
-
-                        break;
-                    }
-                    // =========
+            // Drag System
+            // TODO: Create a function that creates a rectangle from mouse cursor with some arbitrary size
+            auto closest_selectable = [](Entity& other_entity) -> bool {
+                // TODO: Handle entities that doesn't stack in the future.
+                if (!(other_entity.stackable && other_entity.transform && other_entity.draggable)) {
+                    return false;
                 }
+
+                return CheckCollisionPointRec(Vector2{(float) GetMouseX(), (float) GetMouseY()}, other_entity.transform->rec);
+            };
+
+            Entity* entity_to_select = top_entity(Rectangle{(float) GetMouseX(), (float) GetMouseY(), 2.5F, 2.5F}, closest_selectable);
+
+            if (entity_to_select) {
+                entity_to_select->transform->last_rec = entity_to_select->transform->rec;
+                entity_to_select->draggable->is_selected = true;
             }
+            // =========
         } else if (left_clicked && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
             left_clicked = false;
             // User just released left click
@@ -252,6 +241,7 @@ int main() {
                                 return false;
                             }
 
+                            // TODO: Handle entities that doesn't stack in the future.
                             if (!(other_entity.stackable && other_entity.transform)) {
                                 return false;
                             }
