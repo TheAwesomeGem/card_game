@@ -21,11 +21,12 @@ constexpr const float CARD_HEIGHT = 160.0F;
 // TODO: Figure out how to render stacked cards. Slots!
 
 struct TransformComponent {
-    explicit TransformComponent(Rectangle rect_) : rect{rect_} {
+    explicit TransformComponent(Rectangle rec_) : rec{rec_}, last_rec{rec_} {
 
     }
 
-    Rectangle rect;
+    Rectangle rec;
+    Rectangle last_rec;
     // TODO: Use GLM Vector
 };
 
@@ -37,26 +38,29 @@ struct RenderComponent {
     Texture2D texture;
 };
 
-struct SlotComponent {
-    explicit SlotComponent(int max_stack_count_) : max_stack_count{max_stack_count_}, stacked_entities{} {
+struct StackData {
+    explicit StackData(int max_stack_count_) : max_stack_count{max_stack_count_}, stacked_entities{} {
 
     }
 
     int max_stack_count;
     std::deque<EntityId> stacked_entities;
+};
+
+struct StackableComponent {
+    StackData* stack = nullptr;
     // TODO: Perhaps add stack offset either here or the Render Component?
 };
 
 struct DraggableComponent {
     bool is_selected = false;
-    std::optional<EntityId> slot_entity = std::nullopt;
 };
 
 struct Entity {
     EntityId id;
     std::optional<TransformComponent> transform;
     std::optional<RenderComponent> render;
-    std::optional<SlotComponent> slot;
+    std::optional<StackableComponent> stackable;
     std::optional<DraggableComponent> draggable;
 };
 
@@ -83,7 +87,7 @@ Entity* closest_entity(Rectangle rec, const std::function<bool(Entity&)>& predic
             continue;
         }
 
-        float dist_to_drop = RecDistSqr(rec, other_entity.transform->rect);
+        float dist_to_drop = RecDistSqr(rec, other_entity.transform->rec);
 
         if (dist_to_drop < closest_dist) {
             result = &other_entity;
@@ -94,32 +98,54 @@ Entity* closest_entity(Rectangle rec, const std::function<bool(Entity&)>& predic
     return result;
 }
 
-void set_to_slot(Entity& entity, const Entity& slot_entity) {
-    entity.transform->rect.x = slot_entity.transform->rect.x;
-    entity.transform->rect.y = slot_entity.transform->rect.y;
+static void move_to_entity(Entity& entity, const Entity& other_entity) {
+    entity.transform->rec.x = other_entity.transform->rec.x;
+    entity.transform->rec.y = other_entity.transform->rec.y;
 }
 
-void move_to_slot(Entity& entity, Entity& new_slot) {
-    Entity* old_slot = nullptr;
+static void stack_to_entity(Entity& entity_to_stack, Entity& other_entity) {
+    if (entity_to_stack.stackable->stack != nullptr && other_entity.stackable->stack != nullptr && entity_to_stack.stackable->stack == other_entity.stackable->stack) {
+        printf("Stacked to the same entity. No change required.\n");
 
-    if (entity.draggable->slot_entity.has_value()) {
-        printf("Found old slot.\n");
-        old_slot = &entities.at(*entity.draggable->slot_entity);
+        return;
     }
 
-    if (old_slot && old_slot->id != new_slot.id) {
-        printf("Case where old slot exist and it is not the same as new slot.\n");
-        entity.draggable->slot_entity.reset();
-        old_slot->slot->stacked_entities.pop_front();
+    if (entity_to_stack.stackable->stack) {
+        StackData* stack = entity_to_stack.stackable->stack;
+        entity_to_stack.stackable->stack = nullptr;
+        stack->stacked_entities.pop_front(); // Assume that the last selected entity is always at the front of the stack.
+
+        if (stack->stacked_entities.size() < 2) {
+            entities.at(stack->stacked_entities.front()).stackable->stack = nullptr;
+            stack->stacked_entities.clear();
+            printf("Destructing the stack.\n");
+            delete stack; // Could use shared pointer here.
+        }
+
+        printf("Removing entity from old stack.\n");
     }
 
-    if (!(old_slot && old_slot->id == new_slot.id)) {
-        printf("Case where old slot either does not exist nor it's the same slot.\n");
-        entity.draggable->slot_entity = new_slot.id;
-        new_slot.slot->stacked_entities.push_front(entity.id);
+    if (other_entity.stackable->stack) {
+        StackData* stack = other_entity.stackable->stack;
+        stack->stacked_entities.push_front(entity_to_stack.id);
+        entity_to_stack.stackable->stack = stack;
+
+        printf("The new stack exists so adding this entity to the new stack.\n");
+    } else {
+        StackData* stack = new StackData{40}; // TODO: Change the max stack amount based on the context.
+        stack->stacked_entities.push_front(other_entity.id);
+        stack->stacked_entities.push_front(entity_to_stack.id);
+        entity_to_stack.stackable->stack = stack;
+        other_entity.stackable->stack = stack;
+
+        printf("Stack does not exist. Creating a new one.\n");
     }
 
-    set_to_slot(entity, new_slot);
+    move_to_entity(entity_to_stack, other_entity);
+}
+
+static Entity* get_top_entity_from_stack(StackData* stack) {
+    return &entities.at(stack->stacked_entities.front());
 }
 
 int main() {
@@ -131,7 +157,7 @@ int main() {
                              entity_id,
                              std::make_optional<TransformComponent>(Rectangle{0.0F, 0.0F, CARD_WIDTH, CARD_HEIGHT}),
                              std::make_optional<RenderComponent>(LoadTexture("card/2_of_clubs.png")),
-                             std::nullopt,
+                             std::make_optional<StackableComponent>(),
                              std::make_optional<DraggableComponent>()
                      });
     entity_id = uuid_rng();
@@ -140,7 +166,7 @@ int main() {
                              entity_id,
                              std::make_optional<TransformComponent>(Rectangle{CARD_WIDTH + 5.0F, 0.0F, CARD_WIDTH, CARD_HEIGHT}),
                              std::make_optional<RenderComponent>(LoadTexture("card/3_of_clubs.png")),
-                             std::nullopt,
+                             std::make_optional<StackableComponent>(),
                              std::make_optional<DraggableComponent>()
                      });
     entity_id = uuid_rng();
@@ -149,7 +175,7 @@ int main() {
                              entity_id,
                              std::make_optional<TransformComponent>(Rectangle{400.0F, 400.0F, CARD_WIDTH, CARD_HEIGHT}),
                              std::nullopt,
-                             std::make_optional<SlotComponent>(1)
+                             std::make_optional<StackableComponent>()
                      });
     entity_id = uuid_rng();
     entities.emplace(entity_id,
@@ -157,7 +183,7 @@ int main() {
                              entity_id,
                              std::make_optional<TransformComponent>(Rectangle{400.0F + CARD_WIDTH + 5.0F, 400.0F, CARD_WIDTH, CARD_HEIGHT}),
                              std::nullopt,
-                             std::make_optional<SlotComponent>(1)
+                             std::make_optional<StackableComponent>()
                      });
     entity_id = uuid_rng();
     entities.emplace(entity_id,
@@ -165,14 +191,14 @@ int main() {
                              entity_id,
                              std::make_optional<TransformComponent>(Rectangle{400.0F + (CARD_WIDTH * 2.0F) + 5.0F, 400.0F, CARD_WIDTH, CARD_HEIGHT}),
                              std::nullopt,
-                             std::make_optional<SlotComponent>(1)
+                             std::make_optional<StackableComponent>()
                      });
 
     for (auto& [_, entity]: entities) {
         // Entity Initialization Loop:
 
         if (entity.draggable && entity.transform) {
-            // TODO: Set the draggable entity to the correct slots
+
         }
     }
 
@@ -189,14 +215,20 @@ int main() {
             // User just pressed left click
 
             for (auto& [_, entity]: entities) {
-                if (entity.draggable && entity.transform) {
+                if (entity.draggable && entity.transform && entity.stackable) {
                     // Drag System
-                    if (CheckCollisionPointRec(Vector2{(float) GetMouseX(), (float) GetMouseY()}, entity.transform->rect)) {
-                        if (entity.draggable->slot_entity.has_value()) {
-                            const Entity& slot_entity = entities.at(*entity.draggable->slot_entity);
-                            Entity& entity_to_select = entities.at(slot_entity.slot->stacked_entities.front());
-                            entity_to_select.draggable->is_selected = true;
+                    if (CheckCollisionPointRec(Vector2{(float) GetMouseX(), (float) GetMouseY()}, entity.transform->rec)) {
+                        if (entity.stackable.has_value() && entity.stackable->stack) {
+                            Entity* entity_to_select = get_top_entity_from_stack(entity.stackable->stack);
+
+                            if (entity_to_select) {
+                                entity_to_select->transform->last_rec = entity_to_select->transform->rec;
+                                entity_to_select->draggable->is_selected = true;
+                            } else {
+                                printf("Something terrible happened.\n");
+                            }
                         } else {
+                            entity.transform->last_rec = entity.transform->rec;
                             entity.draggable->is_selected = true;
                         }
 
@@ -210,32 +242,33 @@ int main() {
             // User just released left click
 
             for (auto& [_, entity]: entities) {
-                if (entity.draggable && entity.transform) {
+                if (entity.draggable && entity.transform && entity.stackable) {
                     // Drop System
                     if (entity.draggable->is_selected) {
                         entity.draggable->is_selected = false;
-                        Rectangle entity_rec = entity.transform->rect;
 
-                        auto closest_slot = [entity_rec](Entity& other_entity) -> bool {
-                            if (!(other_entity.slot && other_entity.transform)) {
+                        auto closest_stackable = [&entity](Entity& other_entity) -> bool {
+                            if (entity.id == other_entity.id) {
                                 return false;
                             }
 
-                            return CheckCollisionRecs(entity_rec, other_entity.transform->rect);
+                            if (!(other_entity.stackable && other_entity.transform)) {
+                                return false;
+                            }
+
+                            return CheckCollisionRecs(entity.transform->rec, other_entity.transform->rec);
                         };
 
-                        Entity* slot_entity_to_drop = closest_entity(entity_rec, closest_slot);
+                        Entity* stackable_entity = closest_entity(entity.transform->rec, closest_stackable);
 
-                        if (slot_entity_to_drop) {
-                            move_to_slot(entity, *slot_entity_to_drop);
+                        if (stackable_entity) {
+                            stack_to_entity(entity, *stackable_entity);
                         } else {
-                            // TODO: If they don't have an original slot, move them outside of the world view.
-                            if (entity.draggable->slot_entity.has_value()) {
-                                const Entity& old_slot = entities.at(*entity.draggable->slot_entity);
-                                set_to_slot(entity, old_slot);
-                            }
+                            printf("Cannot find stackable entity so moved to last known position.\n");
+                            entity.transform->rec = entity.transform->last_rec;
                         }
 
+                        entity.transform->last_rec = entity.transform->rec;
                         // TODO: Trigger an event or a callback or a state change when card was dropped.
                     }
                     // ==========
@@ -252,8 +285,8 @@ int main() {
             if (entity.draggable && entity.transform) {
                 if (entity.draggable->is_selected) {
                     text_stream << "True ";
-                    entity.transform->rect.x = (float) GetMouseX() - entity.transform->rect.width * 0.5F;
-                    entity.transform->rect.y = (float) GetMouseY() - entity.transform->rect.height * 0.5F;
+                    entity.transform->rec.x = (float) GetMouseX() - entity.transform->rec.width * 0.5F;
+                    entity.transform->rec.y = (float) GetMouseY() - entity.transform->rec.height * 0.5F;
                 } else {
                     text_stream << "False ";
                 }
@@ -269,9 +302,11 @@ int main() {
                 // Entity Draw Loop:
                 // TODO: Needs priority for the system update drawing
 
-                if (entity.slot && entity.transform) {
+                // TODO: Render priority based on stackable
+
+                if (entity.stackable && entity.transform) {
                     // Do Draw Debug Slot
-                    DrawRectangleLinesEx(entity.transform->rect, 2.0F, RED);
+                    DrawRectangleLinesEx(entity.transform->rec, 2.0F, RED);
                 }
 
                 if (entity.render && entity.transform) {
@@ -279,7 +314,7 @@ int main() {
                     DrawTexturePro(
                             entity.render->texture,
                             Rectangle{0, 0, (float) entity.render->texture.width, (float) entity.render->texture.height},
-                            entity.transform->rect,
+                            entity.transform->rec,
                             Vector2{0.0F, 0.0F},
                             0.0F,
                             WHITE
