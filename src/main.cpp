@@ -17,23 +17,21 @@ constexpr const int SCREEN_WIDTH = 1280;
 constexpr const int SCREEN_HEIGHT = 720;
 constexpr const float CARD_WIDTH = 83.25F;
 constexpr const float CARD_HEIGHT = 120.0F;
-constexpr const int MAX_Z_INDEX = 1000;
 
-// TODO: Now there is another bug where we cannot update 'at_top_z' since we move away from that card.
-// TODO: Find a different solution to handle stacking. The 'z' system is not working. We need a more complex solution sadly.
+// TODO: Handle selected card drawing priority.
 // TODO: Add more generators
 // TODO: Just position still be window space or should it be a normalized world space? Figure out sizing, coordinate space, positioning
+// TODO: Refactor the code into files and proper functions and simple abstractions
 
 struct TransformComponent {
-    explicit TransformComponent(Rectangle rec_) : rec{rec_}, last_rec{rec_}, z{0}, last_z{0}, at_top_z{true} {
+    explicit TransformComponent(Rectangle rec_) : rec{rec_}, last_rec{rec_}, next_entity{std::nullopt}, prev_entity{std::nullopt} {
 
     }
 
     Rectangle rec;
     Rectangle last_rec;
-    int last_z;
-    int z;
-    bool at_top_z; // TODO: This is a temp solution to make sure you cannot place a card unless it's at the top of the stack. In the future allow cards to be placed in between
+    std::optional<EntityId> next_entity; // TODO: Not sure if this should be a part of the transform component. Maybe move this to a Stackable Component
+    std::optional<EntityId> prev_entity; // TODO: Not sure if this should be a part of the transform component. Maybe move this to a Stackable Component
 
     // TODO: Use GLM Vector
 };
@@ -77,39 +75,65 @@ bool close_to(float a, float b, float epsilon) {
     return fabs(a - b) <= ((fabs(a) < fabs(b) ? fabs(b) : fabs(a)) * epsilon);
 }
 
+bool rec_equals(Rectangle rec1, Rectangle rec2) {
+    float ep = 0.01F;
+
+    return close_to(rec1.x, rec2.x, ep) &&
+           close_to(rec1.y, rec2.y, ep) &&
+           close_to(rec1.width, rec2.width, ep) &&
+           close_to(rec1.height, rec2.height, ep);
+}
+
+static bool is_top_entity(Entity* entity) {
+    return !entity->transform->next_entity.has_value();
+}
+
 static Rectangle get_screen_rec(Entity* entity) {
     Rectangle dest{entity->transform->rec};
+    std::optional<EntityId> prev_entity_id = entity->transform->prev_entity;
 
-    if (entity->transform->z < MAX_Z_INDEX) {
-        dest.x += entity->render->offset_x * (float) (std::max(entity->transform->z - 1, 0));
-        dest.y += entity->render->offset_y * (float) (std::max(entity->transform->z - 1, 0));
+    while (prev_entity_id.has_value()) {
+        dest.x += entity->render->offset_x;
+        dest.y += entity->render->offset_y;
+
+        Entity& prev_entity = entities.at(*prev_entity_id);
+        prev_entity_id = prev_entity.transform->prev_entity;
     }
 
     return dest;
 }
 
-Entity* top_entity(const std::function<bool(Entity&)>& predicate) {
-    int z_index = 0.0F;
-    Entity* result = nullptr;
+static int get_stack_index(Entity* entity) {
+    int stack_index = 0;
+    std::optional<EntityId> prev_entity_id = entity->transform->prev_entity;
 
+    while (prev_entity_id.has_value()) {
+        ++stack_index;
+        Entity& prev_entity = entities.at(*prev_entity_id);
+        prev_entity_id = prev_entity.transform->prev_entity;
+    }
+
+    return stack_index;
+}
+
+Entity* top_entity(const std::function<bool(Entity&)>& predicate) {
     for (auto& [_, other_entity]: entities) {
         if (!predicate(other_entity)) {
             continue;
         }
 
-        if (other_entity.transform->z >= z_index) {
-            result = &other_entity;
-            z_index = other_entity.transform->z;
+        if (is_top_entity(&other_entity)) {
+            return &other_entity;
         }
     }
 
-    return result;
+    return nullptr;
 }
 
-// TODO: Is there a way to combine these two loops?
+// TODO: Is there a way to combine these loops?
 Entity* closest_entity(Rectangle rec, const std::function<bool(Entity&)>& predicate) {
     float closest_dist = std::numeric_limits<float>::max();
-    Vector2 close_vec;
+    Rectangle close_rec;
 
     for (auto& [_, other_entity]: entities) {
         if (!predicate(other_entity)) {
@@ -120,32 +144,36 @@ Entity* closest_entity(Rectangle rec, const std::function<bool(Entity&)>& predic
         float dist_to_drop = RecDistSqr(rec, other_rec);
 
         if (dist_to_drop < closest_dist) {
-            close_vec = RecToVec(other_rec);
+            close_rec = other_rec;
             closest_dist = dist_to_drop;
         }
     }
 
-    Entity* result = nullptr;
-    int z_index = 0;
+    std::vector<Entity*> stackable_entities;
+
     for (auto& [_, other_entity]: entities) {
         if (!predicate(other_entity)) {
             continue;
         }
 
-        Vector2 other_vec = RecToVec(get_screen_rec(&other_entity));
-
-        // TODO: Create a function that checks if two vecs are close to each other.
-        if (!(close_to(close_vec.x, other_vec.x, 0.1F) && close_to(close_vec.y, other_vec.y, 0.1F))) {
+        if (!(rec_equals(close_rec, get_screen_rec(&other_entity)))) {
             continue;
         }
 
-        if (other_entity.transform->z >= z_index) {
-            result = &other_entity;
-            z_index = other_entity.transform->z;
+        stackable_entities.push_back(&other_entity);
+    }
+
+    if (stackable_entities.size() == 1) {
+        return stackable_entities.front();
+    }
+
+    for (Entity* stackable_entity: stackable_entities) {
+        if (is_top_entity(stackable_entity)) {
+            return stackable_entity;
         }
     }
 
-    return result;
+    return nullptr;
 }
 
 static void move_to_entity(Entity& entity, const Entity& other_entity) {
@@ -154,9 +182,26 @@ static void move_to_entity(Entity& entity, const Entity& other_entity) {
 }
 
 static void stack_to_entity(Entity& entity_to_stack, Entity& other_entity) {
-    entity_to_stack.transform->z = other_entity.transform->z + 1;
-    other_entity.transform->at_top_z = false;
-    entity_to_stack.transform->at_top_z = true;
+    if (entity_to_stack.transform->prev_entity.has_value()) {
+        Entity& prev_stack_entity = entities.at(*entity_to_stack.transform->prev_entity);
+        prev_stack_entity.transform->next_entity = entity_to_stack.transform->next_entity;
+    }
+
+    if (entity_to_stack.transform->next_entity.has_value()) {
+        Entity& next_stack_entity = entities.at(*entity_to_stack.transform->next_entity);
+        next_stack_entity.transform->prev_entity = entity_to_stack.transform->prev_entity;
+    }
+
+
+    entity_to_stack.transform->prev_entity = other_entity.id;
+
+    if (other_entity.transform->next_entity.has_value()) {
+        Entity& next_other_entity = entities.at(*other_entity.transform->next_entity);
+        next_other_entity.transform->prev_entity = entity_to_stack.id;
+        entity_to_stack.transform->next_entity = next_other_entity.id;
+    }
+
+    other_entity.transform->next_entity = entity_to_stack.id;
 
     if (entity_to_stack.render.has_value()) {
         entity_to_stack.render->offset_x = other_entity.render->offset_x;
@@ -233,10 +278,6 @@ int main() {
                     return false;
                 }
 
-                if (!other_entity.transform->at_top_z) {
-                    return false;
-                }
-
                 // TODO: Create a function that creates a rectangle from mouse cursor with some arbitrary size
                 return CheckCollisionPointRec(Vector2{(float) GetMouseX(), (float) GetMouseY()}, get_screen_rec(&other_entity));
             };
@@ -245,8 +286,6 @@ int main() {
 
             if (entity_to_select) {
                 entity_to_select->transform->last_rec = entity_to_select->transform->rec;
-                entity_to_select->transform->last_z = entity_to_select->transform->z;
-                entity_to_select->transform->z = MAX_Z_INDEX;
                 entity_to_select->draggable->is_selected = true;
             }
             // =========
@@ -265,10 +304,6 @@ int main() {
                                 return false;
                             }
 
-                            if (!other_entity.transform->at_top_z) {
-                                return false;
-                            }
-
                             return CheckCollisionRecs(get_screen_rec(&entity), get_screen_rec(&other_entity));
                         };
 
@@ -280,11 +315,9 @@ int main() {
                         } else {
                             printf("Cannot find stackable entity so moved to last known position.\n");
                             entity.transform->rec = entity.transform->last_rec;
-                            entity.transform->z = entity.transform->last_z;
                         }
 
                         entity.transform->last_rec = entity.transform->rec;
-                        entity.transform->last_z = entity.transform->z;
                         // TODO: Trigger an event or a callback or a state change when card was dropped.
                     }
                     // ==========
@@ -318,7 +351,15 @@ int main() {
         }
 
         std::sort(drawable_entities.begin(), drawable_entities.end(), [](Entity* entity1, Entity* entity2) {
-            return entity1->transform->z < entity2->transform->z;
+            if (entity1->draggable && entity1->draggable->is_selected) {
+                return true;
+            }
+
+            if (entity2->draggable && entity2->draggable->is_selected) {
+                return false;
+            }
+
+            return get_stack_index(entity1) < get_stack_index(entity2);
         });
 
         // Draw
