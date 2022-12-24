@@ -18,7 +18,6 @@ constexpr const int SCREEN_HEIGHT = 720;
 constexpr const float CARD_WIDTH = 83.25F;
 constexpr const float CARD_HEIGHT = 120.0F;
 
-// TODO: Handle selected card drawing priority.
 // TODO: Add more generators
 // TODO: Just position still be window space or should it be a normalized world space? Figure out sizing, coordinate space, positioning
 // TODO: Refactor the code into files and proper functions and simple abstractions
@@ -89,6 +88,10 @@ static bool is_top_entity(Entity* entity) {
 }
 
 static Rectangle get_screen_rec(Entity* entity) {
+    if (entity->draggable && entity->draggable->is_selected) {
+        return entity->transform->rec;
+    }
+
     Rectangle dest{entity->transform->rec};
     std::optional<EntityId> prev_entity_id = entity->transform->prev_entity;
 
@@ -104,6 +107,10 @@ static Rectangle get_screen_rec(Entity* entity) {
 }
 
 static int get_stack_index(Entity* entity) {
+    if (entity->draggable && entity->draggable->is_selected) {
+        return 100000;
+    }
+
     int stack_index = 0;
     std::optional<EntityId> prev_entity_id = entity->transform->prev_entity;
 
@@ -297,8 +304,6 @@ int main() {
                 if (entity.draggable && entity.transform) {
                     // Drop System
                     if (entity.draggable->is_selected) {
-                        entity.draggable->is_selected = false;
-
                         auto closest_stackable = [&entity](Entity& other_entity) -> bool {
                             if (entity.id == other_entity.id || !other_entity.transform) {
                                 return false;
@@ -318,6 +323,7 @@ int main() {
                         }
 
                         entity.transform->last_rec = entity.transform->rec;
+                        entity.draggable->is_selected = false;
                         // TODO: Trigger an event or a callback or a state change when card was dropped.
                     }
                     // ==========
@@ -351,14 +357,6 @@ int main() {
         }
 
         std::sort(drawable_entities.begin(), drawable_entities.end(), [](Entity* entity1, Entity* entity2) {
-            if (entity1->draggable && entity1->draggable->is_selected) {
-                return true;
-            }
-
-            if (entity2->draggable && entity2->draggable->is_selected) {
-                return false;
-            }
-
             return get_stack_index(entity1) < get_stack_index(entity2);
         });
 
