@@ -18,7 +18,8 @@ constexpr const int SCREEN_HEIGHT = 720;
 constexpr const float CARD_WIDTH = 83.25F;
 constexpr const float CARD_HEIGHT = 120.0F;
 
-// TODO: Add more generators
+// TODO: Create a pattern system for generator
+// TODO: Add a way to limit where in a stack of card can a card be dropped. For example certain deck only allows cards to be dropped on the front
 // TODO: Just position still be window space or should it be a normalized world space? Figure out sizing, coordinate space, positioning
 // TODO: Refactor the code into files and proper functions and simple abstractions
 
@@ -49,11 +50,16 @@ struct DraggableComponent {
     bool is_selected = false;
 };
 
+struct StackableComponent {
+    // TODO: Add stack limit here.
+};
+
 struct Entity {
     EntityId id;
     std::optional<TransformComponent> transform;
     std::optional<RenderComponent> render;
     std::optional<DraggableComponent> draggable;
+    std::optional<StackableComponent> stackable;
 };
 
 static std::mt19937 rng;
@@ -189,6 +195,12 @@ static void move_to_entity(Entity& entity, const Entity& other_entity) {
 }
 
 static void stack_to_entity(Entity& entity_to_stack, Entity& other_entity) {
+    if (!other_entity.stackable) {
+        printf("Unable to stack as the other_entity is not stackable.\n");
+
+        return;
+    }
+
     if (entity_to_stack.transform->prev_entity.has_value()) {
         Entity& prev_stack_entity = entities.at(*entity_to_stack.transform->prev_entity);
         prev_stack_entity.transform->next_entity = entity_to_stack.transform->next_entity;
@@ -218,14 +230,16 @@ static void stack_to_entity(Entity& entity_to_stack, Entity& other_entity) {
     move_to_entity(entity_to_stack, other_entity);
 }
 
-static Entity& create_card(Vector2 position, std::string_view texture_name) {
+static Entity& create_card(Vector2 position, std::string_view texture_name, bool is_stackable) {
     EntityId entity_id = uuid_rng();
+
     entities.emplace(entity_id,
                      Entity{
                              entity_id,
                              std::make_optional<TransformComponent>(Rectangle{position.x, position.y, CARD_WIDTH, CARD_HEIGHT}),
                              std::make_optional<RenderComponent>(std::make_optional<>(LoadTexture(std::format("card/{}.png", texture_name).c_str())), 0.0F, 0.0F),
-                             std::make_optional<DraggableComponent>()
+                             std::make_optional<DraggableComponent>(),
+                             is_stackable ? std::make_optional<StackableComponent>() : std::nullopt
                      });
 
     return entities.at(entity_id);
@@ -238,25 +252,35 @@ static Entity& create_slot(Vector2 position, float offset_x, float offset_y) {
                              entity_id,
                              std::make_optional<TransformComponent>(Rectangle{position.x, position.y, CARD_WIDTH, CARD_HEIGHT}),
                              std::make_optional<RenderComponent>(std::nullopt, offset_x, offset_y),
+                             std::nullopt,
+                             std::make_optional<StackableComponent>()
                      });
 
     return entities.at(entity_id);
 }
 
-static void create_row_of_cards_with_slots(Vector2 start_position, uint8_t num_of_cards) {
-    for (uint8_t i = 0; i < num_of_cards; ++i) {
-        Entity& entity_slot = create_slot(start_position, 0.0F, -16.0F);
-        Entity& entity_card = create_card(Vector2{}, std::format("{}_of_clubs", std::to_string(i + 2)));
+struct GenerationData {
+    // TODO: Add deck type
+    Vector2 start_position;
+    uint8_t num_of_cards; // TODO: Replace this with a pattern string that we can just draw/generate the cards with. For example: [# # #   #]
+};
+
+static void generate_cards(const GenerationData& generation_data) {
+    Vector2 current_position = generation_data.start_position;
+
+    for (uint8_t i = 0; i < generation_data.num_of_cards; ++i) {
+        Entity& entity_slot = create_slot(current_position, 0.0F, -16.0F);
+        Entity& entity_card = create_card(Vector2{}, std::format("{}_of_clubs", std::to_string(i + 2)), true);
         stack_to_entity(entity_card, entity_slot);
 
-        start_position.x += CARD_WIDTH + 4.0F;
+        current_position.x += CARD_WIDTH + 4.0F;
     }
 }
 
 int main() {
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Card Game");
 
-    create_row_of_cards_with_slots(Vector2{300.0F, 400.0F}, 9);
+    generate_cards(GenerationData{Vector2{300.0F, 400.0F}, 9});
 
     for (auto& [_, entity]: entities) {
         // Entity Initialization Loop:
